@@ -6,7 +6,8 @@ use rustdoc_types::{
 use std::collections::HashMap;
 
 use super::index::{
-    CrateIndex, FieldInfo, ImplBlock, IndexedItem, ItemDetail, ItemKind, MethodInfo, VariantInfo,
+    CrateIndex, ExternalReexport, FieldInfo, ImplBlock, IndexedItem, ItemDetail, ItemKind,
+    MethodInfo, VariantInfo,
 };
 
 /// Convert a `rustdoc_types::Crate` into a `CrateIndex`.
@@ -25,6 +26,7 @@ pub fn parse_crate(krate: &Crate, crate_name: &str, version: &str) -> CrateIndex
         modules: HashMap::new(),
         impl_blocks: HashMap::new(),
         root_items: Vec::new(),
+        reexports: HashMap::new(),
     };
 
     // Build a path map from Id → fully qualified path string using krate.paths
@@ -39,6 +41,29 @@ pub fn parse_crate(krate: &Crate, crate_name: &str, version: &str) -> CrateIndex
     // For each item, look up its path in krate.paths. If not in paths, skip it
     // (it's likely a sub-item like a struct field or variant, handled via parent).
     for (id, item) in &krate.index {
+        if let ItemEnum::Use(import) = &item.inner {
+            if matches!(item.visibility, rustdoc_types::Visibility::Public)
+                && let Some(target_id) = import.id
+                && let Some(summary) = krate.paths.get(&target_id)
+                && let Some(external) = krate.external_crates.get(&summary.crate_id)
+                && let Some((package, version)) = external_location(external)
+            {
+                let parent = path_map
+                    .get(id)
+                    .and_then(|path| path.rsplit_once("::").map(|(parent, _)| parent))
+                    .unwrap_or(crate_name);
+                index.reexports.insert(
+                    format!("{parent}::{}", import.name),
+                    ExternalReexport {
+                        crate_name: package,
+                        version,
+                        target_path: summary.path.join("::"),
+                    },
+                );
+            }
+            continue;
+        }
+
         // Skip impl blocks (handled in phase 2)
         if matches!(&item.inner, ItemEnum::Impl(_)) {
             continue;
@@ -109,6 +134,15 @@ pub fn parse_crate(krate: &Crate, crate_name: &str, version: &str) -> CrateIndex
     );
 
     index
+}
+
+fn external_location(external: &rustdoc_types::ExternalCrate) -> Option<(String, String)> {
+    let parts: Vec<&str> = external.html_root_url.as_deref()?.split('/').collect();
+    let docs_rs = parts.iter().position(|part| *part == "docs.rs")?;
+    Some((
+        parts.get(docs_rs + 1)?.to_string(),
+        parts.get(docs_rs + 2)?.to_string(),
+    ))
 }
 
 struct ParseContext<'a> {
@@ -858,4 +892,24 @@ fn first_sentence(doc: &str) -> String {
         }
     }
     trimmed[..end].trim().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_package_and_version_from_docs_rs_url() {
+        let external = rustdoc_types::ExternalCrate {
+            name: "compio_io".to_string(),
+            html_root_url: Some(
+                "https://docs.rs/compio-io/0.9.0/x86_64-unknown-linux-gnu/compio_io/".to_string(),
+            ),
+        };
+
+        assert_eq!(
+            external_location(&external),
+            Some(("compio-io".to_string(), "0.9.0".to_string()))
+        );
+    }
 }

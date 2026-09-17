@@ -121,12 +121,18 @@ impl RustDocsServer {
         match self.get_or_load_index(&params.crate_name, &version).await {
             Ok(index) => {
                 let module = params.module_path.as_deref().map(|p| {
+                    let p = p.replace('/', "::");
                     if p.contains("::") {
-                        p.to_string()
+                        p
                     } else {
                         format!("{}::{p}", index.crate_name)
                     }
                 });
+                let (index, module) = match module {
+                    Some(module) => self.resolve_reexport(index, module).await,
+                    None => Ok((index, None)),
+                }?;
+                let module = module.filter(|module| module != &index.crate_name);
                 let text = render::render_crate_items(&index, module.as_deref());
                 Ok(CallToolResult::success(vec![Content::text(text)]))
             }
@@ -145,8 +151,21 @@ impl RustDocsServer {
         let version = self.resolve_version(&params.crate_name, params.version.as_deref());
         match self.get_or_load_index(&params.crate_name, &version).await {
             Ok(index) => {
-                let text = if let Some(item) = index.get_item(&params.item_path) {
-                    render::render_item(item)
+                let path = if params.item_path.contains("::") {
+                    params.item_path.clone()
+                } else {
+                    format!("{}::{}", index.crate_name, params.item_path)
+                };
+                let (resolved_index, resolved_path) =
+                    self.resolve_reexport(index.clone(), path).await?;
+                let delegated = !Arc::ptr_eq(&index, &resolved_index);
+                let item = index.get_item(&params.item_path).or_else(|| {
+                    resolved_path
+                        .as_deref()
+                        .and_then(|path| resolved_index.get_item(path))
+                });
+                let text = if let Some(item) = item {
+                    render::render_item(item, delegated.then_some(params.item_path.as_str()))
                 } else {
                     render::render_not_found(&index, &params.item_path)
                 };
@@ -213,6 +232,20 @@ impl ServerHandler for RustDocsServer {
 }
 
 impl RustDocsServer {
+    async fn resolve_reexport(
+        &self,
+        index: Arc<CrateIndex>,
+        path: String,
+    ) -> Result<(Arc<CrateIndex>, Option<String>), rmcp::ErrorData> {
+        let Some((target, target_path)) = index.resolve_reexport(&path) else {
+            return Ok((index, Some(path)));
+        };
+        self.get_or_load_index(&target.crate_name, &target.version)
+            .await
+            .map(|index| (index, Some(target_path)))
+            .map_err(|error| rmcp::ErrorData::internal_error(error.to_string(), None))
+    }
+
     /// Resolve the version to use: explicit > Cargo.lock > "latest"
     fn resolve_version(&self, crate_name: &str, explicit: Option<&str>) -> String {
         if let Some(v) = explicit {

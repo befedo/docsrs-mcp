@@ -14,6 +14,15 @@ pub struct CrateIndex {
     pub impl_blocks: HashMap<String, Vec<ImplBlock>>,
     /// Root module items (items at the crate root).
     pub root_items: Vec<String>,
+    /// Public paths that delegate into another crate.
+    pub reexports: HashMap<String, ExternalReexport>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExternalReexport {
+    pub crate_name: String,
+    pub version: String,
+    pub target_path: String,
 }
 
 /// A single documented item in the crate.
@@ -144,6 +153,10 @@ impl CrateIndex {
     /// Search within the crate for items matching the query.
     pub fn search(&self, query: &str, limit: usize) -> Vec<SearchResult> {
         let query_lower = query.to_lowercase();
+        let terms: Vec<&str> = query_lower.split_whitespace().collect();
+        if terms.is_empty() {
+            return Vec::new();
+        }
         let mut results: Vec<SearchResult> = self
             .items
             .values()
@@ -152,19 +165,24 @@ impl CrateIndex {
                 let path_lower = item.path.to_lowercase();
                 let doc_lower = item.doc.to_lowercase();
 
-                let score = if name_lower == query_lower {
-                    SearchScore::Exact
-                } else if name_lower.starts_with(&query_lower) {
-                    SearchScore::Prefix
-                } else if name_lower.contains(&query_lower) {
-                    SearchScore::NameContains
-                } else if path_lower.contains(&query_lower) {
-                    SearchScore::PathContains
-                } else if doc_lower.contains(&query_lower) {
-                    SearchScore::DocContains
-                } else {
-                    return None;
-                };
+                let score = terms
+                    .iter()
+                    .filter_map(|term| {
+                        if name_lower == *term {
+                            Some(SearchScore::Exact)
+                        } else if name_lower.starts_with(term) {
+                            Some(SearchScore::Prefix)
+                        } else if name_lower.contains(term) {
+                            Some(SearchScore::NameContains)
+                        } else if path_lower.contains(term) {
+                            Some(SearchScore::PathContains)
+                        } else if doc_lower.contains(term) {
+                            Some(SearchScore::DocContains)
+                        } else {
+                            None
+                        }
+                    })
+                    .max()?;
 
                 Some(SearchResult {
                     item: item.clone(),
@@ -221,7 +239,42 @@ impl CrateIndex {
         }
         // Try with crate name prefix
         let full_path = format!("{}::{}", self.crate_name, item_path);
-        self.items.get(&full_path)
+        if let Some(item) = self.items.get(&full_path) {
+            return Some(item);
+        }
+
+        let name = item_path.rsplit("::").next().unwrap_or(item_path);
+        let mut matches = self.items.values().filter(|item| item.name == name);
+        let item = matches.next()?;
+        if matches.next().is_none() {
+            return Some(item);
+        }
+        None
+    }
+
+    /// Resolve the longest public re-export prefix in a path.
+    pub fn resolve_reexport(&self, path: &str) -> Option<(&ExternalReexport, String)> {
+        self.reexports
+            .iter()
+            .filter_map(|(public_path, target)| {
+                let remainder = path
+                    .strip_prefix(public_path)
+                    .filter(|rest| rest.is_empty() || rest.starts_with("::"))?;
+                Some((
+                    public_path.len(),
+                    target,
+                    remainder.trim_start_matches("::"),
+                ))
+            })
+            .max_by_key(|(prefix_len, _, _)| *prefix_len)
+            .map(|(_, target, remainder)| {
+                let path = if remainder.is_empty() {
+                    target.target_path.clone()
+                } else {
+                    format!("{}::{remainder}", target.target_path)
+                };
+                (target, path)
+            })
     }
 
     /// Get impl blocks for a type.
@@ -293,4 +346,95 @@ fn levenshtein(a: &str, b: &str) -> usize {
     }
 
     prev[b_len]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(path: &str, doc: &str) -> IndexedItem {
+        IndexedItem {
+            path: path.to_string(),
+            name: path.rsplit("::").next().unwrap().to_string(),
+            kind: ItemKind::Struct,
+            signature: String::new(),
+            short_doc: String::new(),
+            doc: doc.to_string(),
+            detail: ItemDetail::default(),
+            parent_module: String::new(),
+        }
+    }
+
+    fn index(paths: &[(&str, &str)]) -> CrateIndex {
+        CrateIndex {
+            crate_name: "example".to_string(),
+            version: "1.0.0".to_string(),
+            items: paths
+                .iter()
+                .map(|(path, doc)| (path.to_string(), item(path, doc)))
+                .collect(),
+            modules: HashMap::new(),
+            impl_blocks: HashMap::new(),
+            root_items: Vec::new(),
+            reexports: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn multi_word_search_matches_individual_terms() {
+        let index = index(&[
+            ("example::runtime::spawn", "Spawn a task."),
+            ("example::runtime::JoinHandle", "A task handle."),
+            ("example::other::unrelated", "Nothing relevant."),
+        ]);
+
+        let paths: Vec<_> = index
+            .search("spawn JoinHandle", 20)
+            .into_iter()
+            .map(|result| result.item.path)
+            .collect();
+
+        assert_eq!(
+            paths,
+            ["example::runtime::JoinHandle", "example::runtime::spawn"]
+        );
+    }
+
+    #[test]
+    fn bare_item_lookup_requires_a_unique_name() {
+        let unique = index(&[("example::write::AsyncWriteAt", "")]);
+        assert_eq!(
+            unique
+                .get_item("AsyncWriteAt")
+                .map(|item| item.path.as_str()),
+            Some("example::write::AsyncWriteAt")
+        );
+        assert_eq!(
+            unique
+                .get_item("example::AsyncWriteAt")
+                .map(|item| item.path.as_str()),
+            Some("example::write::AsyncWriteAt")
+        );
+
+        let ambiguous = index(&[("example::a::File", ""), ("example::b::File", "")]);
+        assert!(ambiguous.get_item("File").is_none());
+    }
+
+    #[test]
+    fn reexport_resolution_uses_public_prefix() {
+        let mut index = index(&[]);
+        index.reexports.insert(
+            "example::io".to_string(),
+            ExternalReexport {
+                crate_name: "example-io".to_string(),
+                version: "2.0.0".to_string(),
+                target_path: "example_io".to_string(),
+            },
+        );
+
+        let (target, path) = index.resolve_reexport("example::io::fs::File").unwrap();
+        assert_eq!(target.crate_name, "example-io");
+        assert_eq!(target.version, "2.0.0");
+        assert_eq!(path, "example_io::fs::File");
+    }
 }

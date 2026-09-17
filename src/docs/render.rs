@@ -46,11 +46,14 @@ pub fn render_crate_items(index: &CrateIndex, module_path: Option<&str>) -> Stri
 }
 
 /// Render detailed info for a single item (for `lookup_item`).
-pub fn render_item(item: &IndexedItem) -> String {
+pub fn render_item(item: &IndexedItem, public_path: Option<&str>) -> String {
     let mut parts = Vec::new();
 
     // Header
-    parts.push(format!("## {}\n", item.path));
+    parts.push(format!("## {}\n", public_path.unwrap_or(&item.path)));
+    if public_path.is_some_and(|path| path != item.path) {
+        parts.push(format!("Canonical definition: `{}`\n", item.path));
+    }
 
     // Signature
     parts.push(format!("```rust\n{}\n```\n", item.signature));
@@ -258,4 +261,28 @@ fn kind_label(kind: &ItemKind) -> &'static str {
 
 fn first_line(s: &str) -> &str {
     s.lines().next().unwrap_or("")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::docs::index::ItemDetail;
+
+    #[test]
+    fn renders_public_path_with_canonical_provenance() {
+        let item = IndexedItem {
+            path: "compio_io::write::AsyncWriteAt".to_string(),
+            name: "AsyncWriteAt".to_string(),
+            kind: ItemKind::Trait,
+            signature: "pub trait AsyncWriteAt".to_string(),
+            short_doc: String::new(),
+            doc: String::new(),
+            detail: ItemDetail::default(),
+            parent_module: "compio_io::write".to_string(),
+        };
+
+        let rendered = render_item(&item, Some("compio::io::AsyncWriteAt"));
+        assert!(rendered.starts_with("## compio::io::AsyncWriteAt\n"));
+        assert!(rendered.contains("Canonical definition: `compio_io::write::AsyncWriteAt`"));
+    }
 }
