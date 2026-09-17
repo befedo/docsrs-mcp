@@ -96,7 +96,7 @@ pub fn parse_crate(krate: &Crate, crate_name: &str, version: &str) -> CrateIndex
             None => crate_name.to_string(),
         };
 
-        if let Some(indexed) = ctx.index_item(item, name, &item_path, &parent_module) {
+        if let Some(indexed) = ctx.index_item(item, name, &item_path) {
             let kind = indexed.kind.clone();
 
             // Track in parent module
@@ -151,13 +151,7 @@ struct ParseContext<'a> {
 
 impl<'a> ParseContext<'a> {
     /// Convert a single rustdoc Item into an IndexedItem.
-    fn index_item(
-        &self,
-        item: &Item,
-        name: &str,
-        item_path: &str,
-        parent_module: &str,
-    ) -> Option<IndexedItem> {
+    fn index_item(&self, item: &Item, name: &str, item_path: &str) -> Option<IndexedItem> {
         let (kind, signature, detail) = match &item.inner {
             ItemEnum::Module(_) => (
                 ItemKind::Module,
@@ -234,7 +228,6 @@ impl<'a> ParseContext<'a> {
             short_doc,
             doc,
             detail,
-            parent_module: parent_module.to_string(),
         })
     }
 

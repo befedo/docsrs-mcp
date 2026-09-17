@@ -43,8 +43,6 @@ pub struct IndexedItem {
     pub doc: String,
     /// Kind-specific detail (struct fields, enum variants, trait methods, etc.)
     pub detail: ItemDetail,
-    /// The parent module path (empty string for root items).
-    pub parent_module: String,
 }
 
 /// The kind of a documented item.
@@ -89,8 +87,6 @@ pub struct ItemDetail {
     pub variants: Vec<VariantInfo>,
     /// For traits: list of required/provided methods.
     pub methods: Vec<MethodInfo>,
-    /// For structs/enums: whether it derives common traits.
-    pub derives: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -361,7 +357,6 @@ mod tests {
             short_doc: String::new(),
             doc: doc.to_string(),
             detail: ItemDetail::default(),
-            parent_module: String::new(),
         }
     }
 

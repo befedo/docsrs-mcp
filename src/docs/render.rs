@@ -33,13 +33,7 @@ pub fn render_crate_items(index: &CrateIndex, module_path: Option<&str>) -> Stri
             sections.push(format!("\n### {}s\n", kind_label(&item.kind)));
         }
 
-        let doc_suffix = if item.short_doc.is_empty() {
-            String::new()
-        } else {
-            format!(" — {}", item.short_doc)
-        };
-
-        sections.push(format!("- `{}`{doc_suffix}", item.name));
+        sections.push(format!("- `{}`{}", item.name, doc_suffix(&item.short_doc)));
     }
 
     format!("{header}{}", sections.join("\n"))
@@ -155,15 +149,11 @@ pub fn render_search_results(index: &CrateIndex, query: &str, results: &[SearchR
 
     for result in results {
         let item = &result.item;
-        let doc_suffix = if item.short_doc.is_empty() {
-            String::new()
-        } else {
-            format!(" — {}", item.short_doc)
-        };
         parts.push(format!(
             "- [{kind}] `{path}`{doc_suffix}",
             kind = item.kind,
             path = item.path,
+            doc_suffix = doc_suffix(&item.short_doc),
         ));
     }
 
@@ -259,6 +249,14 @@ fn first_line(s: &str) -> &str {
     s.lines().next().unwrap_or("")
 }
 
+fn doc_suffix(short_doc: &str) -> String {
+    if short_doc.is_empty() {
+        String::new()
+    } else {
+        format!(" — {short_doc}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -274,7 +272,6 @@ mod tests {
             short_doc: String::new(),
             doc: String::new(),
             detail: ItemDetail::default(),
-            parent_module: "compio_io::write".to_string(),
         };
 
         let rendered = render_item(&item, Some("compio::io::AsyncWriteAt"));
