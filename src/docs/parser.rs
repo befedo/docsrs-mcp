@@ -905,6 +905,7 @@ mod tests {
             html_root_url: Some(
                 "https://docs.rs/compio-io/0.9.0/x86_64-unknown-linux-gnu/compio_io/".to_string(),
             ),
+            path: std::path::PathBuf::from("/tmp/compio_io.rmeta"),
         };
 
         assert_eq!(

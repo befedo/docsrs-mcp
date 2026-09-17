@@ -3,8 +3,7 @@ mod docs;
 mod error;
 mod server;
 
-use rmcp::ServiceExt;
-use rmcp::transport::stdio;
+use rmcp::{ServiceExt, transport::stdio};
 
 use crate::cargo_lock::CargoLockIndex;
 use crate::docs::cache::DiskCache;

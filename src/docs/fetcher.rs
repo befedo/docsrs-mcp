@@ -45,7 +45,7 @@ pub fn decode_raw_bytes(
         .unwrap_or(0);
     tracing::info!("Rustdoc JSON for {crate_name} v{version} has format_version {format_version}");
 
-    normalize_for_v56(&mut value, format_version);
+    normalize_for_v61(&mut value, format_version);
 
     let krate: rustdoc_types::Crate = serde_json::from_value(value)?;
     tracing::info!(
@@ -55,16 +55,16 @@ pub fn decode_raw_bytes(
     Ok(krate)
 }
 
-/// Normalize a rustdoc JSON value so it deserializes with `rustdoc-types` 0.56
-/// (format version 56).
+/// Normalize a rustdoc JSON value so it deserializes with `rustdoc-types` 0.61.
 ///
-/// Format differences we handle:
-/// - **53 -> 54**: `Item.attrs` changed from `Vec<String>` to `Vec<Attribute>` (tagged enum).
-///   We don't use attrs, so we empty all attrs arrays.
-/// - **55 -> 56**: `Crate.target: Target` added; `Attribute::MacroExport` variant added.
-///   We inject a dummy target for older formats.
-/// - **56 -> 57**: `ExternalCrate.path: PathBuf` added. We strip it since 0.56 doesn't expect it.
-fn normalize_for_v56(value: &mut serde_json::Value, format_version: u64) {
+/// docs.rs is still serving format 57 for crates like compio 0.18.0 and compio-runtime 0.11.0,
+/// and 0.61 requires `ExternalCrate.path` while older formats omit it. The compatibility shims we
+/// need are therefore:
+/// - **53 -> 54**: `Item.attrs` changed from strings to tagged `Attribute` values. We ignore attrs.
+/// - **55 -> 56**: `Crate.target` was introduced; older JSON omits it, so inject a placeholder.
+/// - **56 -> 57**: `ExternalCrate.path` was introduced; older JSON omits it, so inject a dummy
+///   `PathBuf` for each external crate before deserializing with 0.61.
+fn normalize_for_v61(value: &mut serde_json::Value, format_version: u64) {
     // For all versions: empty attrs arrays (format changed 53->54, we don't use them)
     strip_attrs(value);
 
@@ -73,9 +73,9 @@ fn normalize_for_v56(value: &mut serde_json::Value, format_version: u64) {
         inject_dummy_target(value);
     }
 
-    // For format 57+: strip ExternalCrate.path (doesn't exist in 0.56)
-    if format_version >= 57 {
-        strip_external_crate_paths(value);
+    // 0.61 requires ExternalCrate.path; older docs.rs JSON (format < 57) omitted it.
+    if format_version < 57 {
+        inject_dummy_external_crate_paths(value);
     }
 }
 
@@ -123,15 +123,20 @@ fn inject_dummy_target(value: &mut serde_json::Value) {
     }
 }
 
-/// Remove the `"path"` key from each entry in `"external_crates"`.
+/// Inject a dummy `path` field into each entry in `"external_crates"` when absent.
 ///
-/// Format version 57 added `ExternalCrate.path: PathBuf` which doesn't exist
-/// in rustdoc-types 0.56. Stripping it allows 57+ JSON to deserialize.
-fn strip_external_crate_paths(value: &mut serde_json::Value) {
+/// `rustdoc-types` 0.61 requires `ExternalCrate.path: PathBuf` for all external crates. Older
+/// docs.rs JSON omits the field, so we synthesize a harmless placeholder before deserializing.
+fn inject_dummy_external_crate_paths(value: &mut serde_json::Value) {
     if let Some(serde_json::Value::Object(crates_map)) = value.get_mut("external_crates") {
         for crate_value in crates_map.values_mut() {
-            if let serde_json::Value::Object(crate_obj) = crate_value {
-                crate_obj.remove("path");
+            if let serde_json::Value::Object(crate_obj) = crate_value
+                && !crate_obj.contains_key("path")
+            {
+                crate_obj.insert(
+                    "path".to_string(),
+                    serde_json::Value::String("".to_string()),
+                );
             }
         }
     }
@@ -220,56 +225,42 @@ mod tests {
     // ========== strip_external_crate_paths tests ==========
 
     #[test]
-    fn strip_external_crate_paths_removes_path_field() {
+    fn inject_dummy_external_crate_paths_adds_missing_path_field() {
         let mut value = json!({
             "external_crates": {
-                "0": { "name": "std", "path": "/rustc/src/std" },
-                "1": { "name": "core", "path": "/rustc/src/core" }
+                "0": { "name": "std" },
+                "1": { "name": "core", "html_root_url": "https://docs.rs/core" }
             }
         });
-        strip_external_crate_paths(&mut value);
+        inject_dummy_external_crate_paths(&mut value);
 
         let crate_0 = &value["external_crates"]["0"];
         assert_eq!(crate_0["name"], json!("std"));
-        assert!(crate_0.get("path").is_none());
+        assert_eq!(crate_0["path"], json!(""));
 
         let crate_1 = &value["external_crates"]["1"];
         assert_eq!(crate_1["name"], json!("core"));
-        assert!(crate_1.get("path").is_none());
+        assert_eq!(crate_1["path"], json!(""));
+        assert_eq!(crate_1["html_root_url"], json!("https://docs.rs/core"));
     }
 
     #[test]
-    fn strip_external_crate_paths_preserves_other_fields() {
+    fn inject_dummy_external_crate_paths_noop_when_present() {
         let mut value = json!({
             "external_crates": {
-                "0": { "name": "serde", "html_root_url": "https://docs.rs/serde", "path": "/some/path" }
+                "0": { "name": "serde", "path": "/some/path" }
             }
         });
-        strip_external_crate_paths(&mut value);
-
-        let crate_0 = &value["external_crates"]["0"];
-        assert_eq!(crate_0["name"], json!("serde"));
-        assert_eq!(crate_0["html_root_url"], json!("https://docs.rs/serde"));
-        assert!(crate_0.get("path").is_none());
-    }
-
-    #[test]
-    fn strip_external_crate_paths_noop_without_external_crates() {
-        let mut value = json!({"index": {}, "paths": {}});
         let original = value.clone();
-        strip_external_crate_paths(&mut value);
+        inject_dummy_external_crate_paths(&mut value);
         assert_eq!(value, original);
     }
 
     #[test]
-    fn strip_external_crate_paths_noop_when_no_path_fields() {
-        let mut value = json!({
-            "external_crates": {
-                "0": { "name": "std" }
-            }
-        });
+    fn inject_dummy_external_crate_paths_noop_when_no_external_crates() {
+        let mut value = json!({"index": {}, "paths": {}});
         let original = value.clone();
-        strip_external_crate_paths(&mut value);
+        inject_dummy_external_crate_paths(&mut value);
         assert_eq!(value, original);
     }
 
@@ -294,7 +285,7 @@ mod tests {
         assert_eq!(value, original);
     }
 
-    // ========== normalize_for_v56 integration tests ==========
+    // ========== normalize_for_v61 integration tests ==========
 
     #[test]
     fn normalize_v53_strips_attrs_and_injects_target() {
@@ -307,7 +298,7 @@ mod tests {
                 "1": { "name": "std" }
             }
         });
-        normalize_for_v56(&mut value, 53);
+        normalize_for_v61(&mut value, 53);
 
         // attrs should be emptied
         assert_eq!(value["index"]["0"]["attrs"], json!([]));
@@ -328,14 +319,14 @@ mod tests {
                 "1": { "name": "core" }
             }
         });
-        normalize_for_v56(&mut value, 56);
+        normalize_for_v61(&mut value, 56);
 
         assert_eq!(value["index"]["0:1"]["attrs"], json!([]));
         assert_eq!(value["external_crates"]["1"]["name"], json!("core"));
     }
 
     #[test]
-    fn normalize_v57_strips_attrs_and_external_crate_paths() {
+    fn normalize_v57_keeps_external_crate_paths() {
         let mut value = json!({
             "format_version": 57,
             "index": {
@@ -346,29 +337,29 @@ mod tests {
                 "2": { "name": "alloc", "path": "/rustc/library/alloc" }
             }
         });
-        normalize_for_v56(&mut value, 57);
+        normalize_for_v61(&mut value, 57);
 
-        // attrs emptied
         assert_eq!(value["index"]["0:1"]["attrs"], json!([]));
-        // paths stripped from external_crates
-        assert!(value["external_crates"]["1"].get("path").is_none());
-        assert!(value["external_crates"]["2"].get("path").is_none());
-        // names preserved
-        assert_eq!(value["external_crates"]["1"]["name"], json!("std"));
-        assert_eq!(value["external_crates"]["2"]["name"], json!("alloc"));
+        assert_eq!(
+            value["external_crates"]["1"]["path"],
+            json!("/rustc/library/std")
+        );
+        assert_eq!(
+            value["external_crates"]["2"]["path"],
+            json!("/rustc/library/alloc")
+        );
     }
 
     #[test]
-    fn normalize_v58_also_strips_external_crate_paths() {
-        // Future format versions should also get path stripping
+    fn normalize_v58_keeps_external_crate_paths() {
         let mut value = json!({
             "format_version": 58,
             "external_crates": {
                 "0": { "name": "foo", "path": "/some/path" }
             }
         });
-        normalize_for_v56(&mut value, 58);
-        assert!(value["external_crates"]["0"].get("path").is_none());
+        normalize_for_v61(&mut value, 58);
+        assert_eq!(value["external_crates"]["0"]["path"], json!("/some/path"));
     }
 
     // ========== Deserialization roundtrip tests ==========
@@ -459,7 +450,7 @@ mod tests {
     #[test]
     fn roundtrip_v56_deserializes_successfully() {
         let mut value = minimal_rustdoc_json(56);
-        normalize_for_v56(&mut value, 56);
+        normalize_for_v61(&mut value, 56);
         let krate: rustdoc_types::Crate =
             serde_json::from_value(value).expect("v56 JSON should deserialize after normalization");
         assert_eq!(krate.index.len(), 2);
@@ -472,7 +463,7 @@ mod tests {
         let mut value = minimal_rustdoc_json(53);
         value["index"]["1"]["attrs"] = json!(["#[derive(Debug)]", "#[allow(unused)]"]);
 
-        normalize_for_v56(&mut value, 53);
+        normalize_for_v61(&mut value, 53);
         let krate: rustdoc_types::Crate = serde_json::from_value(value)
             .expect("v53 JSON with string attrs should deserialize after normalization");
         assert_eq!(krate.index.len(), 2);
@@ -480,18 +471,18 @@ mod tests {
 
     #[test]
     fn roundtrip_v57_with_external_crate_path_deserializes() {
-        // Format 57 adds ExternalCrate.path which doesn't exist in 0.56
+        // Format 57 adds ExternalCrate.path; 0.61 expects it, and a dummy is injected only for
+        // older format versions.
         let mut value = minimal_rustdoc_json(57);
         value["external_crates"]["2"]
             .as_object_mut()
             .unwrap()
             .insert("path".to_string(), json!("/rustc/library/std"));
 
-        normalize_for_v56(&mut value, 57);
+        normalize_for_v61(&mut value, 57);
         let krate: rustdoc_types::Crate = serde_json::from_value(value)
             .expect("v57 JSON with ExternalCrate.path should deserialize after normalization");
         assert_eq!(krate.index.len(), 2);
-        // Verify external crate is preserved (minus the path field)
         assert!(krate.external_crates.values().any(|c| c.name == "std"));
     }
 
@@ -510,9 +501,8 @@ mod tests {
 
     #[test]
     fn roundtrip_v57_extra_fields_ignored_by_serde() {
-        // serde's default behavior ignores unknown fields, so ExternalCrate.path
-        // doesn't cause a deserialization error. Our strip_external_crate_paths
-        // is defensive in case deny_unknown_fields is ever added.
+        // serde's default behavior ignores unknown fields, so additional external-crate fields are
+        // still accepted. 0.61 also accepts the live docs.rs path field.
         let mut value = minimal_rustdoc_json(57);
         value["external_crates"]["2"]
             .as_object_mut()

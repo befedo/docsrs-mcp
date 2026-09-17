@@ -66,33 +66,29 @@ pub fn render_item(item: &IndexedItem, public_path: Option<&str>) -> String {
 
     // Kind-specific details
     match item.kind {
-        ItemKind::Struct | ItemKind::Union => {
-            if !item.detail.fields.is_empty() {
-                parts.push("### Fields\n".to_string());
-                for f in &item.detail.fields {
-                    let doc = if f.doc.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" — {}", first_line(&f.doc))
-                    };
-                    parts.push(format!("- `{}`: `{}`{doc}", f.name, f.type_str));
-                }
-                parts.push(String::new());
+        ItemKind::Struct | ItemKind::Union if !item.detail.fields.is_empty() => {
+            parts.push("### Fields\n".to_string());
+            for f in &item.detail.fields {
+                let doc = if f.doc.is_empty() {
+                    String::new()
+                } else {
+                    format!(" — {}", first_line(&f.doc))
+                };
+                parts.push(format!("- `{}`: `{}`{doc}", f.name, f.type_str));
             }
+            parts.push(String::new());
         }
-        ItemKind::Enum => {
-            if !item.detail.variants.is_empty() {
-                parts.push("### Variants\n".to_string());
-                for v in &item.detail.variants {
-                    let doc = if v.doc.is_empty() {
-                        String::new()
-                    } else {
-                        format!("\n  {}", first_line(&v.doc))
-                    };
-                    parts.push(format!("- `{}`{doc}", v.name));
-                }
-                parts.push(String::new());
+        ItemKind::Enum if !item.detail.variants.is_empty() => {
+            parts.push("### Variants\n".to_string());
+            for v in &item.detail.variants {
+                let doc = if v.doc.is_empty() {
+                    String::new()
+                } else {
+                    format!("\n  {}", first_line(&v.doc))
+                };
+                parts.push(format!("- `{}`{doc}", v.name));
             }
+            parts.push(String::new());
         }
         ItemKind::Trait => {
             let required: Vec<_> = item

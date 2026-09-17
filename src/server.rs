@@ -1,9 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use rmcp::handler::server::tool::ToolRouter;
-use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::*;
+use rmcp::handler::server::{router::tool::ToolRouter, wrapper::Parameters};
+use rmcp::model::{CallToolResult, ContentBlock, ServerCapabilities, ServerConfig};
 use rmcp::schemars;
 use rmcp::schemars::JsonSchema;
 use rmcp::{ServerHandler, tool, tool_handler, tool_router};
@@ -25,6 +24,7 @@ pub struct RustDocsServer {
     http_client: reqwest::Client,
     cache: CrateCache,
     disk_cache: Option<Arc<DiskCache>>,
+    #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
 }
 
@@ -80,7 +80,7 @@ struct LookupImplBlockParams {
 
 // ========== Server implementation ==========
 
-#[tool_router]
+#[tool_router(router = tool_router)]
 impl RustDocsServer {
     pub fn new(cargo_lock: Option<CargoLockIndex>, use_disk_cache: bool) -> Self {
         let disk_cache = if use_disk_cache {
@@ -134,9 +134,11 @@ impl RustDocsServer {
                 }?;
                 let module = module.filter(|module| module != &index.crate_name);
                 let text = render::render_crate_items(&index, module.as_deref());
-                Ok(CallToolResult::success(vec![Content::text(text)]))
+                Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
             }
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+            Err(e) => Ok(CallToolResult::error(vec![ContentBlock::text(
+                e.to_string(),
+            )])),
         }
     }
 
@@ -169,9 +171,11 @@ impl RustDocsServer {
                 } else {
                     render::render_not_found(&index, &params.item_path)
                 };
-                Ok(CallToolResult::success(vec![Content::text(text)]))
+                Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
             }
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+            Err(e) => Ok(CallToolResult::error(vec![ContentBlock::text(
+                e.to_string(),
+            )])),
         }
     }
 
@@ -189,9 +193,11 @@ impl RustDocsServer {
             Ok(index) => {
                 let results = index.search(&params.query, limit);
                 let text = render::render_search_results(&index, &params.query, &results);
-                Ok(CallToolResult::success(vec![Content::text(text)]))
+                Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
             }
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+            Err(e) => Ok(CallToolResult::error(vec![ContentBlock::text(
+                e.to_string(),
+            )])),
         }
     }
 
@@ -208,26 +214,23 @@ impl RustDocsServer {
             Ok(index) => {
                 let impls = index.get_impl_blocks(&params.item_path);
                 let text = render::render_impls(&params.item_path, &impls);
-                Ok(CallToolResult::success(vec![Content::text(text)]))
+                Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
             }
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+            Err(e) => Ok(CallToolResult::error(vec![ContentBlock::text(
+                e.to_string(),
+            )])),
         }
     }
 }
 
 #[tool_handler]
 impl ServerHandler for RustDocsServer {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            instructions: Some(
-                "Rust documentation server. Fetches and serves crate documentation from docs.rs. \
-                 Use lookup_crate_items to explore crate structure, lookup_item for detailed docs, \
-                 search_crate to find items, and lookup_impl_block for implementations."
-                    .into(),
-            ),
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            ..Default::default()
-        }
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
+            "Rust documentation server. Fetches and serves crate documentation from docs.rs. \
+             Use lookup_crate_items to explore crate structure, lookup_item for detailed docs, \
+             search_crate to find items, and lookup_impl_block for implementations.",
+        )
     }
 }
 
